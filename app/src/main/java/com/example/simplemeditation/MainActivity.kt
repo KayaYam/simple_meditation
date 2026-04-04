@@ -12,6 +12,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -47,19 +49,23 @@ fun MindfulnessApp() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("meditation_prefs", Context.MODE_PRIVATE) }
 
+    // Состояния приложения
     var selectedTime by remember { mutableStateOf(prefs.getInt("time", 10)) }
     var selectedTheme by remember { mutableStateOf(prefs.getString("theme", "Светлая") ?: "Светлая") }
     var selectedSound by remember { mutableStateOf(prefs.getString("sound", "Птицы") ?: "Птицы") }
     var isTimerRunning by remember { mutableStateOf(false) }
     var timeLeft by remember { mutableStateOf(0) }
 
+    // Состояния диалогов
     var showTimeDialog by remember { mutableStateOf(false) }
     var showBackgroundDialog by remember { mutableStateOf(false) }
     var showMainMenu by remember { mutableStateOf(false) }
     var showThemeDialog by remember { mutableStateOf(false) }
     var showMeditationMenu by remember { mutableStateOf(false) }
 
-    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    // Плееры для бесшовного зацикливания
+    var currentMp by remember { mutableStateOf<MediaPlayer?>(null) }
+    var nextMp by remember { mutableStateOf<MediaPlayer?>(null) }
 
     val themeData = remember(selectedTheme) {
         when (selectedTheme) {
@@ -70,9 +76,78 @@ fun MindfulnessApp() {
         }
     }
 
+    // Вспомогательная функция для бесконечного бесшовного цикла
+    fun setupNextPlayer(resId: Int) {
+        try {
+            nextMp = MediaPlayer.create(context, resId)
+            currentMp?.setNextMediaPlayer(nextMp)
+            currentMp?.setOnCompletionListener { mp ->
+                mp.release()
+                currentMp = nextMp
+                setupNextPlayer(resId) // Рекурсивно готовим следующий шаг очереди
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+    }
+
+    // Управление звуком
+    LaunchedEffect(isTimerRunning, selectedSound) {
+        val resId = when (selectedSound) {
+            "Птицы" -> R.raw.birds; "Ферма" -> R.raw.farm
+            "Водопад" -> R.raw.waterfall; "Волны" -> R.raw.sea
+            "Ручей" -> R.raw.stream; "Снег" -> R.raw.snow
+            "Костер" -> R.raw.fire; "Лягушки" -> R.raw.frogs
+            "Волки" -> R.raw.wolf; "Бубен" -> R.raw.drum
+            "Лиса" -> R.raw.fox; "Бубен" -> R.raw.drum
+            "Глюкофон" -> R.raw.gluk
+            else -> R.raw.birds
+        }
+
+        if (isTimerRunning) {
+            // Очистка при смене звука
+            currentMp?.release()
+            nextMp?.release()
+
+            val mp = MediaPlayer.create(context, resId)
+            currentMp = mp
+            setupNextPlayer(resId)
+
+            // Fade In (2 секунды)
+            mp.setVolume(0f, 0f)
+            mp.start()
+            val steps = 20
+            for (i in 1..steps) {
+                delay(100L)
+                if (!isTimerRunning) break
+                val vol = i.toFloat() / steps
+                mp.setVolume(vol, vol)
+            }
+        } else {
+            // Плавное затухание при стопе (1.5 секунды)
+            val mpToFade = currentMp
+            currentMp = null
+            nextMp?.release()
+            nextMp = null
+
+            mpToFade?.let { mp ->
+                try {
+                    if (mp.isPlaying) {
+                        val steps = 15
+                        for (i in steps downTo 0) {
+                            val vol = i.toFloat() / steps
+                            mp.setVolume(vol, vol)
+                            delay(100L)
+                        }
+                        mp.stop()
+                    }
+                    mp.release()
+                } catch (e: Exception) { mp.release() }
+            }
+        }
+    }
+
+    // Анимации интерфейса
     val timerAlpha by animateFloatAsState(if (isTimerRunning || timeLeft > 0) 1f else 0f, label = "timer")
     val uiElementsAlpha by animateFloatAsState(if (isTimerRunning) 0f else 1f, label = "ui")
-
     val infiniteTransition = rememberInfiniteTransition(label = "breathing")
     val scale by infiniteTransition.animateFloat(
         initialValue = 1f, targetValue = if (isTimerRunning) 1.15f else 1f,
@@ -80,97 +155,11 @@ fun MindfulnessApp() {
         label = "scale"
     )
 
+    // Логика таймера
     LaunchedEffect(isTimerRunning, timeLeft) {
         if (isTimerRunning && timeLeft > 0) { delay(1000); timeLeft-- }
         else if (timeLeft == 0 && isTimerRunning) isTimerRunning = false
     }
-
-    LaunchedEffect(isTimerRunning, selectedSound) {
-        if (isTimerRunning) {
-            // При старте нового звука мы НЕ трогаем старый (пусть дозатухает сам)
-            // Но нам нужно убедиться, что mediaPlayer свободен для нового объекта
-            mediaPlayer = null
-
-            val resId = when (selectedSound) {
-                "Птицы" -> R.raw.birds; "Ферма" -> R.raw.farm
-                "Водопад" -> R.raw.waterfall; "Волны" -> R.raw.sea
-                "Ручей" -> R.raw.stream; "Снег" -> R.raw.snow
-                "Костер" -> R.raw.fire; "Лягушки" -> R.raw.frogs
-                "Волки" -> R.raw.wolf
-                else -> R.raw.birds
-            }
-
-            var isFirstStart = true
-
-            suspend fun playTrack() {
-                if (!isTimerRunning) return
-
-                try {
-                    val mp = MediaPlayer.create(context, resId)
-                    mediaPlayer = mp
-
-                    // FADE IN
-                    val fadeInSteps = if (isFirstStart) 20 else 5
-                    mp.setVolume(0f, 0f)
-                    mp.start()
-
-                    for (i in 1..fadeInSteps) {
-                        delay(100L)
-                        if (!isTimerRunning) return
-                        val vol = i.toFloat() / fadeInSteps
-                        mp.setVolume(vol, vol)
-                    }
-
-                    isFirstStart = false
-
-                    val duration = mp.duration
-                    if (duration > 1000) {
-                        delay((duration - 600).toLong())
-
-                        // FADE OUT МЕЖДУ КЛИПАМИ (0.5 сек)
-                        if (isTimerRunning) {
-                            for (i in 5 downTo 1) {
-                                val vol = i.toFloat() / 5f
-                                mp.setVolume(vol, vol)
-                                delay(100L)
-                            }
-                        }
-                    }
-
-                    mp.stop()
-                    mp.release()
-
-                    if (isTimerRunning) playTrack()
-
-                } catch (e: Exception) { e.printStackTrace() }
-            }
-
-            playTrack()
-
-        } else {
-            // МЯГКИЙ ФИНАЛ (3 секунды)
-            val mpToFade = mediaPlayer // Копируем ссылку на текущий плеер
-            mediaPlayer = null // Сразу освобождаем основную переменную для новых запусков
-
-            mpToFade?.let { mp ->
-                try {
-                    if (mp.isPlaying) {
-                        val finalFadeSteps = 15
-                        for (i in finalFadeSteps downTo 0) {
-                            val vol = i.toFloat() / finalFadeSteps
-                            mp.setVolume(vol, vol)
-                            delay(100L)
-                        }
-                        mp.stop()
-                    }
-                    mp.release()
-                } catch (e: Exception) {
-                    try { mp.release() } catch (ex: Exception) {}
-                }
-            }
-        }
-    }
-
 
     Surface(modifier = Modifier.fillMaxSize(), color = themeData.backgroundColor) {
         Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -186,6 +175,7 @@ fun MindfulnessApp() {
 
             Spacer(modifier = Modifier.weight(1f))
 
+            // Кнопка Старт/Стоп
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
@@ -202,6 +192,7 @@ fun MindfulnessApp() {
 
             Spacer(modifier = Modifier.weight(1f))
 
+            // Нижняя панель управления
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -211,7 +202,6 @@ fun MindfulnessApp() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // ПЕРЕДАЕМ ЗНАЧЕНИЯ ДЛЯ НАДПИСЕЙ
                 ControlIcon(R.drawable.ic_timer, "$selectedTime мин", themeData) {
                     if (uiElementsAlpha > 0.5f) showTimeDialog = true
                 }
@@ -224,6 +214,7 @@ fun MindfulnessApp() {
             }
         }
 
+        // --- Диалоги и меню ---
         if (showTimeDialog) {
             TimeSelectionDialog(current = selectedTime, onSelect = { selectedTime = it; prefs.edit().putInt("time", it).apply(); showTimeDialog = false }, onDismiss = { showTimeDialog = false }, themeData = themeData)
         }
@@ -292,7 +283,6 @@ fun ControlIcon(id: Int, label: String, themeData: ThemeData, onClick: () -> Uni
             tint = themeData.textColor.copy(alpha = 0.7f),
             modifier = Modifier.size(30.dp)
         )
-        // ВОТ ЭТА СТРОЧКА ВЕРНУЛАСЬ:
         Text(label, fontSize = 11.sp, color = themeData.secondaryTextColor)
     }
 }
@@ -320,6 +310,8 @@ fun TimeSelectionDialog(current: Int, onSelect: (Int) -> Unit, onDismiss: () -> 
     )
 }
 
+
+
 @Composable
 fun SoundSelectionDialog(current: String, onSelect: (String) -> Unit, onDismiss: () -> Unit, themeData: ThemeData) {
     AlertDialog(
@@ -327,14 +319,28 @@ fun SoundSelectionDialog(current: String, onSelect: (String) -> Unit, onDismiss:
         containerColor = themeData.backgroundColor,
         title = { Text("Фоновый звук", color = themeData.textColor) },
         text = {
-            Column {
-                listOf("Птицы", "Ферма", "Водопад", "Волны", "Ручей", "Снег", "Костер", "Лягушки", "Волки").forEach { sound ->
-                    TextButton(onClick = { onSelect(sound) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(sound, color = if (sound == current) themeData.accentColor else themeData.textColor)
+            // Ограничиваем высоту, чтобы диалог не растягивался бесконечно
+            Box(modifier = Modifier.heightIn(max = 400.dp)) {
+                LazyColumn {
+                    val sounds = listOf("Птицы", "Ферма", "Водопад", "Волны", "Ручей", "Снег", "Костер", "Лягушки", "Волки","Бубен", "Лиса", "Глюкофон")
+                    items(sounds) { sound ->
+                        TextButton(
+                            onClick = { onSelect(sound) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = sound,
+                                color = if (sound == current) themeData.accentColor else themeData.textColor
+                            )
+                        }
                     }
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть", color = themeData.accentColor) } }
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Закрыть", color = themeData.accentColor)
+            }
+        }
     )
 }
